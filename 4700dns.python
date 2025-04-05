@@ -2,6 +2,7 @@
 
 import argparse, socket, time, json, select, struct, sys, math
 from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A
+from io import StringIO
 
 class Server:
     def __init__(self, root_ip, domain, port):
@@ -14,6 +15,10 @@ class Server:
 
         self.log("Bound to port %d" % self.port)
 
+        self.records = {}  # Add this before calling parse_zone_file
+        self.auth_domain = None
+        self.parse_zone_file(domain)
+
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
@@ -22,18 +27,45 @@ class Server:
         self.log("Sending message:\n%s" % message)
         self.socket.sendto(message.pack(), addr)
 
+    def parse_zone_file(self, file_path):
+        with open(file_path, 'r') as f:
+            zone_text = f.read()
+
+        for rr in RR.fromZone(zone_text):
+            # Check if this is the SOA record
+            if rr.rtype == QTYPE.SOA:
+                # Store the domain (rname) from the SOA record as the authoritative domain
+                self.auth_domain = str(rr.rname)
+                self.log("Found SOA record for domain: %s" % self.auth_domain)
+
+            # Add the record to the records dictionary
+            name = str(rr.rname)
+            if name in self.records:
+                self.records[name].append(rr)
+            else:
+                self.records[name] = [rr]
+
+
+
     def recv(self, socket):
         data, addr = socket.recvfrom(65535)
 
-        # Unpack the DNS request
+        # Parse DNS request
         request = DNSRecord.parse(data)
         self.log("Received message:\n%s" % request)
 
-        # YOU WILL NEED TO ACTUALLY DO SOMETHING SMART HERE
-        # WE ARE JUST REPLYING WITH A FIXED RESPONSE
+        qname = str(request.q.qname)
+        qtype = QTYPE[request.q.qtype]
+
         response = request.reply()
-        response.add_answer(RR("abc.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=60))       
-        
+
+        # Match the query against zone records
+        if qname in self.records:
+            for rr in self.records[qname]:
+                # Only add answers matching the query type or ANY
+                if QTYPE[rr.rtype] == qtype or qtype == "ANY":
+                    response.add_answer(rr)
+
         self.send(addr, response)
 
     def run(self):
